@@ -5,31 +5,17 @@
 # 使用 aekl 进行风格迁移 (This not work... 🤔)
 # migrated from https://github.com/gsurma/style_transfer
 
-import warnings ; warnings.filterwarnings(action='ignore', category=UserWarning)
+from utils import *
 
-from pathlib import Path
-from argparse import ArgumentParser
-from typing import List, Tuple
-
-from PIL import Image
-import torch
 from torch.autograd import grad
-from torch import Tensor, Size
+from torch import Size
 from torch.nn import Module as Model
 import torchvision.transforms.functional as TF
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.autoencoders.vae import Encoder, DiagonalGaussianDistribution
-import numpy as np
-from numpy import ndarray
 from scipy.optimize import fmin_l_bfgs_b
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-BASE_PATH = Path(__file__).parent
-IMG_PATH = BASE_PATH / 'img'
-CONTENT_FILE = IMG_PATH / 'contents' / 'Tuebingen_Neckarfront.jpg'
-STYLE_FILE = IMG_PATH / 'styles' / 'vangogh_starry_night.jpg'
-OUTPUT_FILE = IMG_PATH / 'output.png'
+OUTPUT_FILE = OUT_PATH / 'aekl.png'
 
 VAE_CKPTS = [
   "stabilityai/sd-vae-ft-ema",
@@ -43,7 +29,6 @@ def load_img(fp:Path, resize:tuple=None) -> Tensor:
   if resize: img = img.resize(resize, Image.BILINEAR)
   X = TF.to_tensor(img)
   return X
-
 
 def resize_match(dst:Tensor, src:Tensor) -> Tensor:
   C, H, W = dst.shape
@@ -69,7 +54,6 @@ def Encoder_forward_hijack(self:Encoder, x:Tensor) -> Tuple[Tensor, List[Tensor]
   hs.append(x)
   return x, hs
 
-
 def AutoencoderKL_encode_hijack(self:AutoencoderKL, x:Tensor, sample_posterior:bool=False) -> List[Tensor]:
   x, hs = Encoder_forward_hijack(self.encoder, x)
   moments = self.quant_conv(x)
@@ -83,8 +67,6 @@ def AutoencoderKL_encode_hijack(self:AutoencoderKL, x:Tensor, sample_posterior:b
 
 
 class Evaluator:
-
-  ''' Modified from the official https://github.com/gsurma/style_transfer '''
 
   def __init__(self, args, model:Model, shape:Size, hs_c:List[Tensor], hs_s:List[Tensor]):
     self.args = args
@@ -188,8 +170,8 @@ if __name__ == '__main__':
   parser = ArgumentParser()
   parser.add_argument('-R', '--repo',    default=VAE_CKPTS[-1], help='huggingface AutoencoderKL model name, you can search from https://huggingface.co/models?other=diffusers%3AAutoencoderKL')
   parser.add_argument('-r', '--resize',  default='512,512',    type=str,   help='resize input image: w,h')
-  parser.add_argument('-c', '--content', default=CONTENT_FILE, type=Path,  help='path to content image file')
-  parser.add_argument('-s', '--style',   default=STYLE_FILE,   type=Path,  help='path to style image file')
+  parser.add_argument('-c', '--content', default=DEFAULT_CONTENT_FILE, type=Path,  help='path to content image file')
+  parser.add_argument('-s', '--style',   default=DEFAULT_STYLE_FILE,   type=Path,  help='path to style image file')
   parser.add_argument('-o', '--output',  default=OUTPUT_FILE,  type=Path,  help='path to output image file')
   parser.add_argument('-C', '--content_layers', default=[7, 8],    nargs='+', type=int, help='layer index for content fmap')
   parser.add_argument('-S', '--style_layers',   default=[0, 1, 2], nargs='+', type=int, help='layer index for style fmap')

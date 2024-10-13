@@ -4,21 +4,8 @@
 
 # 使用 aekl/tae 进行风格迁移
 
-import warnings ; warnings.filterwarnings(action='ignore', category=UserWarning)
-import warnings ; warnings.filterwarnings(action='ignore', category=FutureWarning)
-
-from PIL import Image
-from argparse import ArgumentParser
-from typing import Tuple, Dict, NamedTuple, Union
-
-import torch
-import torch.nn.functional as F
-from torch import nn, Tensor
-from torch.optim import Adam
-from torchvision import transforms as T
+from utils import *
 from diffusers.models import AutoencoderKL, AutoencoderTiny
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 
 AutoEncoder = type[Union[AutoencoderKL, AutoencoderTiny]]
 
@@ -36,61 +23,6 @@ PRETRAINED_MODELS = {
   'taesd3':        Entry('madebyollin/taesd3',            AutoencoderTiny),
 }
 
-parser = ArgumentParser()
-parser.add_argument('-M', default='taesdxl', choices=PRETRAINED_MODELS.keys())
-parser.add_argument('-C', default='./img/Tuebingen_Neckarfront.jpg', help='content image file')
-parser.add_argument('-S', default='./img/vangogh_starry_night.jpg',  help='style image file')
-args = parser.parse_args()
-
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print('>> device:', device)
-dtype = torch.bfloat16
-print('>> dtype:', dtype)
-
-VAE_POSTPROCESS = False
-if args.M.startswith('taesd'):  # preset for taesdxl
-  style_layers = {
-    '0': 0.75,
-    '3': 1.0,
-    '7': 0.5,
-    '11': 0.3,
-  }
-  content_layers = {
-    '13': 1.0,
-    #'quant': 1.0,
-  }
-elif args.M.startswith('sd'):  # preset for sdxl
-  style_layers = {
-    'conv_in': 0.75,
-    'down_block.0': 1.0,
-    'down_block.1': 0.4,
-    'down_block.2': 0.2,
-    'down_block.3': 0.1,
-    #'mid_block': 0.1,
-  }
-  content_layers = {
-    'conv_out': 1.0,
-    #'quant': 1.0,
-  }
-content_weight = 1   # alpha
-style_weight = 10    # beta
-steps = 1500         # decide how many iterations to update your image (5000)
-log_every = 100
-lr = 8 / 255
-
-
-def im_load(fp:str, resize:int=400, shape:Tuple[int, int]=None) -> Tensor:
-  img = Image.open(fp).convert('RGB')
-  size = shape or min(resize, max(img.size))
-  transform = T.Compose([
-    T.Resize(size),
-    T.ToTensor(),
-    T.Lambda(lambda x: x * 2 - 1),
-  ])
-  return transform(img).unsqueeze(0)
-
-def im_convert(x:Tensor):
-  return (x + 1).div(2).detach().squeeze().permute(1, 2, 0).clamp(0, 1).float().cpu().numpy()
 
 def AutoencoderKL_encode_hijack(self:AutoencoderKL, x:Tensor) -> Dict[str, Tensor]:
   acts = {}
@@ -130,13 +62,9 @@ def get_activations(x:Tensor, model:nn.Module) -> Dict[str, Tensor]:
   if isinstance(model, AutoencoderTiny):
     return AutoencoderTiny_encode_hijack(model, x)
 
-def gram_matrix(x:Tensor) -> Tensor:
-  _, c, h, w = x.shape
-  x = x.view(c, h * w)
-  return torch.mm(x, x.T)
-
 
 def run(model:str, c_fp:str, s_fp:str):
+  ''' Model '''
   entry = PRETRAINED_MODELS[model]
   print(f'>> model repo {entry.path!r}')
   vae: AutoEncoder = entry.cls.from_pretrained(entry.path)
@@ -146,13 +74,17 @@ def run(model:str, c_fp:str, s_fp:str):
     param.requires_grad_(False)
   print(vae)
 
-  content = im_load(c_fp)                          .to(device, dtype)
-  style   = im_load(s_fp, shape=content.shape[-2:]).to(device, dtype)
+  ''' Make GT '''
+  content = im_load(c_fp,                           normalizer='±1').to(device, dtype)
+  style   = im_load(s_fp, shape=content.shape[-2:], normalizer='±1').to(device, dtype)
   content_features = get_activations(content, vae)
   style_grams = {layer: gram_matrix(feature) for layer, feature in get_activations(style, vae).items()}
 
+  ''' Optimize! '''
   target = content.detach().clone().requires_grad_(True)
   optim = Adam([target], lr=lr)
+
+  ts_start = time()
   for i in tqdm(range(steps)):
     activations = get_activations(target, vae)
 
@@ -170,20 +102,52 @@ def run(model:str, c_fp:str, s_fp:str):
     loss.backward()
     optim.step()
 
-    if (i + 1) % log_every == 0:
+    if (i + 1) % 100 == 0:
       print('>> loss:', loss.item(), 'content_loss', content_loss.item(), 'style_loss:', style_loss.item())
 
-  imgs = [content, target, style]
-  titles = ['content', 'transfered', 'style']
-  nfig = len(imgs)
-  fig, axs = plt.subplots(1, nfig, figsize=(14, 4))
-  for i, ax in enumerate(axs):
-    ax.imshow(im_convert(imgs[i]))
-    ax.set_title(titles[i])
-  plt.suptitle(f'style-transfer via {model}')
-  plt.tight_layout()
-  plt.show()
+  ts_end = time()
+  print(f'>> Runtime: {ts_end - ts_start:.3f}s')
+
+  ''' Show '''
+  im_save(target, model, normalizer='±1')
+  #im_show_compare([content, target, style], model, normalizer='±1')
 
 
 if __name__ == '__main__':
+  parser = ArgumentParser()
+  parser.add_argument('-M', default='taesdxl', choices=PRETRAINED_MODELS.keys())
+  parser.add_argument('-C', default=DEFAULT_CONTENT_FILE, help='content image file')
+  parser.add_argument('-S', default=DEFAULT_STYLE_FILE, help='style image file')
+  args = parser.parse_args()
+
+  VAE_POSTPROCESS = False
+  if args.M.startswith('taesd'):  # preset for taesdxl
+    style_layers = {
+      '0': 0.75,
+      '3': 1.0,
+      '7': 0.5,
+      '11': 0.3,
+    }
+    content_layers = {
+      '13': 1.0,
+      #'quant': 1.0,
+    }
+  elif args.M.startswith('sd'):   # preset for sdxl
+    style_layers = {
+      'conv_in': 0.75,
+      'down_block.0': 1.0,
+      'down_block.1': 0.4,
+      'down_block.2': 0.2,
+      'down_block.3': 0.1,
+      #'mid_block': 0.1,
+    }
+    content_layers = {
+      'conv_out': 1.0,
+      #'quant': 1.0,
+    }
+  content_weight = 1   # alpha
+  style_weight = 10    # beta
+  steps = 1500         # decide how many iterations to update your image (5000)
+  lr = 8 / 255
+
   run(args.M, args.C, args.S)
